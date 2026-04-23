@@ -24,3 +24,10 @@ Thumbs.db
 # Build output
 dist/
 build/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Lambda deploy artifact
+lambda-deploy.zip

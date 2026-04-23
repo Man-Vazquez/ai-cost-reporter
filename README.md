@@ -1,117 +1,192 @@
-# 🤖 AI Cost Reporter
+# 🤖 AI Cost Collector
 
-A Node.js tool to fetch and report daily usage costs from multiple AI providers (OpenAI, Vertex AI, and others). Generates detailed CSV reports broken down by user, project, model, and token consumption.
-
----
-
-## 📋 Features
-
-- 📊 Fetches **previous day's costs** automatically (UTC range)
-- 👤 Groups usage by **user, project and model**
-- 🔄 Handles **pagination** for large organizations
-- 📁 Exports results to a **clean CSV file**
-- ⚡ Supports both **completion and embedding models**
-- 🧩 Easily extensible to other AI providers (Vertex AI, etc.)
+Serverless pipeline para recolección y normalización de costos diarios de APIs de IA.
+Corre como Lambda en AWS, escribe JSONL particionado a S3 y expone los datos vía Athena.
 
 ---
 
-## 🛠️ Tech Stack
+## 🏗️ Arquitectura
 
-- Node.js
-- axios
-- dotenv
-- fs (built-in)
-
----
-
-## 🚀 Getting Started
-
-### 1. Clone the repository
-
-```bash
-git clone git@github-personal:Man-Vazquez/ai-cost-reporter.git
-cd ai-cost-reporter
+```
+EventBridge (cron 8:00 AM UTC)
+        │
+        ▼
+  Lambda: ai-costs-collector
+  ┌─────────────────────────────────┐
+  │  index.js (dispatcher)          │
+  │    ├── collectors/openai.js     │
+  │    ├── collectors/vertex.js     │  ← pendiente
+  │    ├── collectors/elevenlabs.js │  ← pendiente
+  │    └── ...                      │
+  │                                 │
+  │  shared/s3Writer.js             │
+  └─────────────────────────────────┘
+        │
+        ▼
+  S3: ai-costs-lake
+  data/provider={p}/year={Y}/month={M}/day={D}/report.jsonl
+        │
+        ▼
+  Glue Crawler → Athena (openai_db)
+        │
+        ▼
+  Power BI Dashboard  ← pendiente
+        │
+  DLQ + CloudWatch Alarm + SNS email (alertas de fallos)
 ```
 
-### 2. Install dependencies
+---
+
+## 📁 Estructura del proyecto
+
+```
+api-costs-v2/
+├── index.js                  # Lambda handler / dispatcher
+├── collectors/
+│   └── openai.js             # Collector OpenAI
+├── shared/
+│   └── s3Writer.js           # Módulo compartido de escritura a S3
+├── scripts/
+│   └── package-lambda.js     # Empaquetador ZIP para Lambda
+├── test/
+│   ├── test-openai.js
+│   └── test-handler.js
+└── package.json
+```
+
+---
+
+## 📄 Schema de salida (`ai_costs`)
+
+Cada fila del JSONL sigue este schema común:
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `date` | string | Fecha del reporte `YYYY-MM-DD` |
+| `project_id` | string | ID del proyecto en el proveedor |
+| `user_name` | string | Nombre del usuario o service account |
+| `model` | string | Modelo utilizado |
+| `operation_type` | string | `input_text`, `input_cached`, `output_text`, `output_thinking` |
+| `tier` | null | Reservado para planes/tiers futuros |
+| `input_units` | int | Tokens de entrada (sin caché) |
+| `output_units` | int | Tokens de salida |
+| `cached_tokens` | int | Tokens servidos desde caché |
+| `unit_type` | string | `"tokens"` (o `"characters"` para otros proveedores) |
+| `requests` | int | Número de requests (asignado a `input_text` únicamente) |
+| `total_usd` | float | Costo en USD |
+| `total_mxn` | null | Reservado para conversión MXN |
+| `fx_rate` | null | Reservado para tipo de cambio |
+| `sku_raw` | string | `line_item` original de la API del proveedor |
+
+> El campo `provider` va en la partición S3, no en el JSONL — Glue lo detecta automáticamente como columna virtual.
+
+### Partición S3
+
+```
+data/provider={provider}/year={YYYY}/month={MM}/day={DD}/report.jsonl
+```
+
+---
+
+## 🚀 Desarrollo local
+
+### 1. Instalar dependencias
 
 ```bash
 npm install
 ```
 
-### 3. Configure environment variables
+### 2. Configurar variables de entorno
 
-Create a `.env` file in the root of the project:
+Crea un archivo `.env` en la raíz:
 
 ```env
-OPENAI_ADMIN_KEY=your_openai_admin_api_key_here
-# VERTEX_KEY=your_vertex_key_here  (coming soon)
+OPENAI_ADMIN_KEY=sk-admin-...
+S3_BUCKET=ai-costs-lake
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
 ```
 
-> ⚠️ Never commit your `.env` file. It is already included in `.gitignore`.
-
-### 4. Run the report
+### 3. Scripts disponibles
 
 ```bash
-node get_costs_openai.js
+# Prueba local del collector OpenAI (llama a la API y escribe en S3)
+npm run test:openai
+
+# Prueba local del dispatcher Lambda completo
+npm run test:handler
+
+# Genera lambda-deploy.zip listo para subir a AWS
+npm run package
 ```
 
 ---
 
-## 📄 Output
+## 📦 Deploy
 
-The script generates a CSV file named `openai_report_YYYY-MM-DD.csv` with the following columns:
+### 1. Generar el ZIP
 
-| Column | Description |
-|---|---|
-| `date` | Report date |
-| `name` | User or service account name |
-| `user_id` | OpenAI user ID |
-| `project_id` | Project ID |
-| `model` | AI model used |
-| `input_tokens` | Input tokens consumed |
-| `output_tokens` | Output tokens generated |
-| `cached_tokens` | Cached input tokens |
-| `total_tokens` | Total tokens (input + output) |
-| `requests` | Number of API requests |
-| `total_usd` | Total cost in USD |
-
----
-
-## 📁 Project Structure
-
-```
-ai-cost-reporter/
-├── get_costs_openai.js   # OpenAI cost report script
-├── get_costs_vertex.js   # Vertex AI cost report script (WIP)
-├── server.js             # Entry point / server (if applicable)
-├── .env                  # Environment variables (not committed)
-├── .gitignore
-└── README.md
+```bash
+npm run package
+# → lambda-deploy.zip (~8 MB)
 ```
 
----
+### 2. Subir a Lambda
 
-## 🔒 Security
+```bash
+aws lambda update-function-code \
+  --function-name ai-costs-collector \
+  --zip-file fileb://lambda-deploy.zip
+```
 
-- API keys are loaded via environment variables using `dotenv`
-- `.env` is excluded from version control via `.gitignore`
-- Never hardcode credentials in source files
+### 3. Variables de entorno en Lambda
+
+Las credenciales se configuran directamente en la consola de Lambda o vía CLI — **no se usa `.env` en producción**:
+
+```bash
+aws lambda update-function-configuration \
+  --function-name ai-costs-collector \
+  --environment "Variables={OPENAI_ADMIN_KEY=sk-admin-...,S3_BUCKET=ai-costs-lake}"
+```
+
+`AWS_REGION` es inyectada automáticamente por el runtime de Lambda.
+
+### 4. Invocar manualmente
+
+```bash
+aws lambda invoke \
+  --function-name ai-costs-collector \
+  --payload '{"providers":["openai"]}' \
+  response.json
+```
 
 ---
 
 ## 🗺️ Roadmap
 
-- [x] OpenAI cost reporting
-- [ ] Vertex AI cost reporting
-- [ ] Unified multi-provider report
-- [ ] Scheduled automatic daily execution
-- [ ] Email/Slack report delivery
+- [x] Collector OpenAI
+- [x] Pipeline Lambda + S3 + Athena
+- [x] Deploy automático con EventBridge (cron diario 8:00 AM UTC)
+- [x] Alertas DLQ + CloudWatch + SNS email
+- [ ] Collector Vertex AI
+- [ ] Collector ElevenLabs
+- [ ] Collector Deepgram
+- [ ] Collector VAPI
+- [ ] Vista Athena `v_ai_costs_enriched` + `service_mapping`
+- [ ] Dashboard Power BI
 
 ---
 
-## 👤 Author
+## 🔒 Seguridad
+
+- En local: las credenciales van en `.env` (excluido del repo vía `.gitignore`)
+- En producción: las credenciales van en variables de entorno de Lambda — nunca en el código ni en el ZIP
+
+---
+
+## 👤 Autor
 
 **Manuel Vazquez**
-- GitHub: [@Man-Vazquez](https://github.com/Man-Vazquez)
-- Email: jose.mtto94@gmail.com
+- GitHub: [@manvzzgt](https://github.com/manvzzgt)
+- Email: manuel.vazquez@enginetsystems.com
